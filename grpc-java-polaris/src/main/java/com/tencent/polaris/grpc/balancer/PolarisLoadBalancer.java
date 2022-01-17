@@ -16,30 +16,42 @@
 
 package com.tencent.polaris.grpc.balancer;
 
-import com.google.common.base.MoreObjects;
+import com.tencent.polaris.api.config.consumer.LoadBalanceConfig;
+import com.tencent.polaris.api.pojo.DefaultInstance;
+import com.tencent.polaris.api.pojo.DefaultServiceInstances;
+import com.tencent.polaris.api.pojo.Instance;
+import com.tencent.polaris.api.pojo.ServiceInstancesWrap;
+import com.tencent.polaris.api.pojo.ServiceKey;
 import com.tencent.polaris.factory.api.RouterAPIFactory;
 import com.tencent.polaris.router.api.core.RouterAPI;
+import com.tencent.polaris.router.api.rpc.ProcessLoadBalanceRequest;
+import com.tencent.polaris.router.api.rpc.ProcessLoadBalanceResponse;
+import io.grpc.ConnectivityState;
+import io.grpc.ConnectivityStateInfo;
 import io.grpc.EquivalentAddressGroup;
 import io.grpc.LoadBalancer;
 import io.grpc.Status;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.net.InetSocketAddress;
-import java.net.SocketAddress;
 import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
-import static com.google.common.base.Preconditions.checkNotNull;
-import static io.grpc.ConnectivityState.TRANSIENT_FAILURE;
+import static io.grpc.ConnectivityState.CONNECTING;
 
 /**
  * @author lixiaoshuang
  */
 public class PolarisLoadBalancer extends LoadBalancer {
     
-    private Helper helper;
+    private final Logger log = LoggerFactory.getLogger(PolarisLoadBalancer.class);
     
-    private String loadBalancerType;
+    private final Helper helper;
     
     private Subchannel subchannel;
+    
+    private String loadBalancerType;
     
     private static final RouterAPI routerAPI = RouterAPIFactory.createRouterAPI();
     
@@ -49,47 +61,65 @@ public class PolarisLoadBalancer extends LoadBalancer {
     }
     
     @Override
+    public void handleResolvedAddresses(ResolvedAddresses resolvedAddresses) {
+        log.info("handle address:{}", resolvedAddresses.getAddresses().toString());
+    
+        ServiceInstancesWrap serviceInstancesWrap = new ServiceInstancesWrap();
+    
+        List<DefaultInstance> instances = resolvedAddresses.getAddresses().stream().map(equivalentAddressGroup -> {
+            DefaultInstance defaultInstance = new DefaultInstance();
+            return defaultInstance;
+        }).collect(Collectors.toList());
+        
+        ServiceInstancesWrap serviceInstancesWrap = new ServiceInstancesWrap(new DefaultServiceInstances(new ServiceKey(),instances));
+        ProcessLoadBalanceRequest processLoadBalanceRequest = new ProcessLoadBalanceRequest();
+        processLoadBalanceRequest.setDstInstances(serviceInstancesWrap);
+        processLoadBalanceRequest.setLbPolicy(loadBalancerType);
+        ProcessLoadBalanceResponse processLoadBalanceResponse = routerAPI.processLoadBalance(processLoadBalanceRequest);
+        
+        Subchannel subchannel = helper.createSubchannel(
+                CreateSubchannelArgs.newBuilder().setAddresses(resolvedAddresses.getAddresses()).build());
+        
+//        List<EquivalentAddressGroup> servers = resolvedAddresses.getAddresses();
+//        if (subchannel == null) {
+//            final Subchannel subchannel = helper.createSubchannel(
+//                    CreateSubchannelArgs.newBuilder().setAddresses(servers).build());
+//            subchannel.start(new SubchannelStateListener() {
+//                @Override
+//                public void onSubchannelState(ConnectivityStateInfo stateInfo) {
+//                    processSubchannelState(subchannel, stateInfo);
+//                }
+//            });
+//            this.subchannel = subchannel;
+//
+//            // The channel state does not get updated when doing name resolving today, so for the moment
+//            // let LB report CONNECTION and call subchannel.requestConnection() immediately.
+//            helper.updateBalancingState(CONNECTING,
+//                    new PickFirstLoadBalancer.Picker(PickResult.withSubchannel(subchannel)));
+//            subchannel.requestConnection();
+//        } else {
+//            subchannel.updateAddresses(servers);
+//        }
+    }
+    
+    @Override
     public void handleNameResolutionError(Status error) {
-        helper.updateBalancingState(TRANSIENT_FAILURE, new ErrorPicker(error));
+        log.info("Name resolution error:{}", error);
+        helper.updateBalancingState(ConnectivityState.TRANSIENT_FAILURE,
+                new PolarisSubchannelPicker();
     }
     
     @Override
     public void shutdown() {
-        if (subchannel != null) {
+        if (Objects.nonNull(subchannel)) {
+            log.info("shutdown channel address:{}", subchannel.getAddresses().toString());
             subchannel.shutdown();
         }
     }
     
     @Override
-    public void handleResolvedAddresses(ResolvedAddresses resolvedAddresses) {
-        List<EquivalentAddressGroup> addresses = resolvedAddresses.getAddresses();
-        for (EquivalentAddressGroup address : addresses) {
-            List<SocketAddress> addresses1 = address.getAddresses();
-            for (SocketAddress socketAddress : addresses1) {
-                InetSocketAddress inetSocketAddress = (InetSocketAddress)socketAddress;
-                int port = inetSocketAddress.getPort();
-                String hostName = inetSocketAddress.getHostName();
-                System.out.println("处理名字解析的服务地址：" + socketAddress.toString());
-            }
-        }
-    }
-    
-    static final class ErrorPicker extends SubchannelPicker {
-        
-        private final Status error;
-        
-        ErrorPicker(Status error) {
-            this.error = checkNotNull(error, "error");
-        }
-        
-        @Override
-        public PickResult pickSubchannel(PickSubchannelArgs args) {
-            return PickResult.withError(error);
-        }
-        
-        @Override
-        public String toString() {
-            return MoreObjects.toStringHelper(this).add("error", error).toString();
-        }
+    public void requestConnection() {
+        log.info("connection address:{}", subchannel.getAddresses().toString());
+        subchannel.requestConnection();
     }
 }
